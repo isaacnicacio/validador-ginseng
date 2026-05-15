@@ -1,73 +1,54 @@
-import streamlit as st
-from lxml import etree
-import re
-import zipfile
-import io
-
-st.set_page_config(page_title="Portal Fiscal Ginseng", layout="wide")
-
-if 'banco_notas' not in st.session_state:
-    st.session_state['banco_notas'] = {}
-
-def extrair_id_unico(conteudo, nome_original):
-    try:
-        root = etree.fromstring(conteudo)
-        # Tenta Chave de Acesso
-        ids = root.xpath('//@Id | //@id | //@ID')
-        if ids: return re.sub(r'\D', '', ids[0])
-        # Tenta CNPJ + Número
-        num = root.xpath('//*[local-name()="nNF"] | //*[local-name()="nNFSe"]')
-        cnpj = root.xpath('//*[local-name()="CNPJ"]')
-        if num and cnpj: return f"{cnpj[0].text}_{num[0].text}"
-    except: pass
-    # Se falhar tudo, usa o nome original do ficheiro para não perder a nota
-    return nome_original.replace(".xml", "")
-
-st.title("🛡️ Sistema Ginseng - Processamento Total")
-st.metric("📊 Notas na Base", len(st.session_state['banco_notas']))
-
-aba1, aba2 = st.tabs(["🔍 Consultar", "📦 Upload Total"])
-
-with aba2:
-    st.header("Upload de Lote")
-    arquivos_up = st.file_uploader("Suba o ZIP aqui", type=['xml', 'zip'], accept_multiple_files=True)
-    
-    if st.button("🚀 Processar Tudo (Sem Descartes)"):
-        if arquivos_up:
-            cont_xml = 0
-            for item in arquivos_up:
-                if item.name.endswith('.zip'):
-                    with zipfile.ZipFile(item) as z:
-                        for info in z.infolist():
-                            # Ignora pastas, foca apenas em ficheiros .xml
-                            if not info.is_dir() and info.filename.lower().endswith('.xml'):
-                                conteudo = z.read(info.filename)
-                                chave = extrair_id_unico(conteudo, info.filename)
-                                # Se a chave já existe, cria uma variante para não apagar a anterior
-                                if chave in st.session_state['banco_notas']:
-                                    chave = f"{chave}_{cont_xml}"
-                                st.session_state['banco_notas'][chave] = conteudo
-                                cont_xml += 1
-                else:
-                    conteudo = item.read()
-                    chave = extrair_id_unico(conteudo, item.name)
-                    st.session_state['banco_notas'][chave] = conteudo
-                    cont_xml += 1
-            
-            st.success(f"✅ Processados {cont_xml} ficheiros XML do seu lote!")
-            st.rerun()
-
 with aba1:
-    st.header("Busca")
+    st.header("🔍 Consulta de Vencimentos")
     if not st.session_state['banco_notas']:
-        st.warning("Base vazia.")
+        st.warning("⚠️ A base está vazia. Processe o ZIP na aba ao lado primeiro.")
     else:
-        busca = st.text_input("Digite a chave ou número:")
+        busca = st.text_input("Digite o número da nota ou a chave de acesso:")
+        
         if busca:
+            # Procura todas as notas que contêm o termo buscado
             encontrados = [k for k in st.session_state['banco_notas'].keys() if busca in k]
+            
             if encontrados:
                 for k in encontrados:
-                    st.write(f"📄 Nota: {k}")
-                    # Lógica de extração de vencimentos aqui...
+                    conteudo = st.session_state['banco_notas'][k]
+                    try:
+                        root = etree.fromstring(conteudo)
+                        
+                        with st.expander(f"📄 Detalhes da Nota: {k}", expanded=True):
+                            # 1. Identificação do Fornecedor
+                            fornecedor = root.xpath('//*[local-name()="xNome"]/text()')
+                            if fornecedor:
+                                st.info(f"🏢 **Fornecedor:** {fornecedor[0]}")
+
+                            # 2. Captura de Vencimentos (Lógica para Notas de Serviço/Boticário)
+                            # Procura no campo de informações complementares
+                            inf_comp = root.xpath('//*[local-name()="xInfComp"]/text()')
+                            
+                            st.subheader("📅 Prazos de Pagamento")
+                            achou_vencimento = False
+
+                            if inf_comp:
+                                # Procura o padrão "R$ X,XX venc DD/MM/AAAA" no texto
+                                prazos = re.findall(r'R\$\s*[\d,.]+\s*venc\s*\d{2}/\d{2}/\d{4}', inf_comp[0])
+                                for p in prazos:
+                                    st.warning(f"💡 Encontrado no texto: **{p}**")
+                                    achou_vencimento = True
+
+                            # 3. Captura de Vencimentos (Lógica para NF-e padrão - duplicatas)
+                            dups = root.xpath('//*[local-name()="dup"]')
+                            for d in dups:
+                                venc = d.xpath('.//*[local-name()="dVenc"]/text()')
+                                valor = d.xpath('.//*[local-name()="vDup"]/text()')
+                                if venc:
+                                    valor_formatado = f"R$ {valor[0]}" if valor else ""
+                                    st.success(f"📅 Parcelamento: **{venc[0]}** | {valor_formatado}")
+                                    achou_vencimento = True
+
+                            if not achou_vencimento:
+                                st.error("❌ Nenhum vencimento formatado foi encontrado dentro deste XML.")
+                                
+                    except Exception as e:
+                        st.error(f"Erro ao ler o ficheiro {k}: {e}")
             else:
-                st.error("Não encontrado.")
+                st.error("❓ Nota não encontrada na base de 2.000 arquivos.")
