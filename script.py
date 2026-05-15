@@ -5,104 +5,93 @@ import zipfile
 
 st.set_page_config(page_title="Portal Fiscal Ginseng", layout="wide")
 
-# Inicializa o banco de dados na memória do site
 if 'banco_notas' not in st.session_state:
     st.session_state['banco_notas'] = {}
 
 st.title("🛡️ Sistema Integrado Grupo Ginseng")
 
-# Painel de Controle Lateral
 st.sidebar.metric("📊 Notas na Base", len(st.session_state['banco_notas']))
-if st.sidebar.button("🗑️ Limpar Tudo para Novo Lote"):
+if st.sidebar.button("🗑️ Limpar Base"):
     st.session_state['banco_notas'] = {}
     st.rerun()
 
-aba1, aba2 = st.tabs(["🔍 Consultar Nota", "📦 Upload de Lote (ZIP)"])
+aba1, aba2 = st.tabs(["🔍 Consultar Nota", "📦 Upload de Lote"])
 
 with aba2:
     st.header("Upload de Lote")
-    st.write("Dica: O sistema agora aceita Notas de Serviço (TOTVS) e busca vencimentos no texto.")
-    arquivos_up = st.file_uploader("Arraste o ZIP de 2.000 notas aqui", type=['xml', 'zip'], accept_multiple_files=True)
+    arquivos_up = st.file_uploader("Arraste o ZIP ou XMLs aqui", type=['xml', 'zip'], accept_multiple_files=True)
     
-    if st.button("🚀 Processar e Salvar"):
+    if st.button("🚀 Processar Tudo"):
         if arquivos_up:
-            total_adicionado = 0
+            lidos = 0
             for item in arquivos_up:
                 if item.name.lower().endswith('.zip'):
                     with zipfile.ZipFile(item) as z:
                         for info in z.infolist():
                             if not info.is_dir() and info.filename.lower().endswith('.xml'):
                                 conteudo = z.read(info.filename).decode('utf-8', errors='ignore')
-                                
-                                # CRUCIAL: Criamos um índice com o conteúdo todo para a nota "subir" de qualquer jeito
-                                # Usamos o nome do arquivo no ZIP como chave única inicial
-                                id_temp = info.filename
-                                st.session_state['banco_notas'][id_temp] = conteudo
-                                total_adicionado += 1
+                                st.session_state['banco_notas'][info.filename] = conteudo
+                                lidos += 1
                 else:
                     conteudo = item.read().decode('utf-8', errors='ignore')
                     st.session_state['banco_notas'][item.name] = conteudo
-                    total_adicionado += 1
-            
-            st.success(f"✅ {total_adicionado} notas subiram para o sistema!")
+                    lidos += 1
+            st.success(f"✅ {lidos} notas indexadas!")
             st.rerun()
 
 with aba1:
-    st.header("Busca de Vencimentos")
-    busca = st.text_input("Digite o Código (Ex: LM9BUVRG), Número da Nota ou CNPJ:")
+    st.header("Busca")
+    termo = st.text_input("Digite o número da nota, código ou parte do conteúdo:")
     
-    if busca:
-        busca = busca.strip().upper()
-        # Busca inteligente: olha dentro do texto de cada nota que "subiu"
-        resultados = [v for k, v in st.session_state['banco_notas'].items() if busca in v.upper()]
+    if termo:
+        termo = termo.strip().upper()
+        # Busca dentro do texto bruto de cada nota
+        resultados = [v for k, v in st.session_state['banco_notas'].items() if termo in v.upper()]
 
         if resultados:
-            st.success(f"Encontrada(s) {len(resultados)} nota(s) correspondente(s)!")
+            st.success(f"Encontrei {len(resultados)} nota(s)!")
             for xml_str in resultados:
                 try:
-                    # O parser 'recover' ajuda a ler notas com caracteres especiais
-                    parser = etree.XMLParser(recover=True)
+                    # REMOVE NAMESPACES: Isso faz o código ler notas de qualquer prefeitura/formato
+                    parser = etree.XMLParser(recover=True, remove_blank_text=True)
                     root = etree.fromstring(xml_str.encode('utf-8'), parser=parser)
-                    
-                    # Extração de Dados do Emitente
-                    prestador = root.xpath('//*[local-name()="RazaoSocialPrestador"]/text() | //*[local-name()="xNome"]/text()')
-                    numero = root.xpath('//*[local-name()="NumeroNFe"]/text() | //*[local-name()="nNF"]/text() | //*[local-name()="nNFSe"]/text()')
-                    
-                    with st.expander(f"📄 Nota {numero[0] if numero else 'S/N'} - {prestador[0] if prestador else 'Fornecedor'}", expanded=True):
-                        if prestador: st.info(f"🏢 **Fornecedor:** {prestador[0]}")
+                    for elem in root.getiterator():
+                        if not (isinstance(elem, etree._Comment) or isinstance(elem, etree._ProcessingInstruction)):
+                            elem.tag = etree.QName(elem).localname
+                    etree.cleanup_namespaces(root)
+
+                    # Extração de Dados
+                    emitente = root.xpath('//emit/xNome/text() | //RazaoSocialPrestador/text() | //xNome/text()')
+                    numero = root.xpath('//nNFSe/text() | //nNF/text() | //NumeroNFe/text()')
+                    valor = root.xpath('//vServ/text() | //vNF/text() | //ValorServicos/text()')
+
+                    with st.expander(f"📄 Nota {numero[0] if numero else 'S/N'} - {emitente[0] if emitente else 'Fornecedor'}", expanded=True):
+                        st.write(f"💰 **Valor Total:** R$ {valor[0] if valor else 'Não identificado'}")
                         
-                        # --- LÓGICA DE VENCIMENTOS ---
                         vencimentos = []
+                        
+                        # 1. Busca em Discriminacao/InfComp (Texto corrido)
+                        texto_extra = root.xpath('//xDescServ/text() | //Discriminacao/text() | //xInfComp/text()')
+                        if texto_extra:
+                            datas = re.findall(r'VENC(?:\.:|:)?\s*(\d{2}/\d{2}/\d{4})', texto_extra[0].upper())
+                            datas_bot = re.findall(r'R\$\s*[\d,.]+\s*venc\s*(\d{2}/\d{2}/\d{4})', texto_extra[0])
+                            for d in (datas + datas_bot):
+                                vencimentos.append(f"Vencimento: {d} (Encontrado no texto)")
 
-                        # 1. Notas TOTVS/Prefeituras (Campo Discriminacao)
-                        discrim = root.xpath('//*[local-name()="Discriminacao"]/text()')
-                        if discrim:
-                            # Procura "VENC.: 24/05/2026", "VENC 24/05/2026", etc.
-                            datas = re.findall(r'VENC(?:\.:|:)?\s*(\d{2}/\d{2}/\d{4})', discrim[0].upper())
-                            for d in datas:
-                                vencimentos.append(f"Vencimento: {d} (Extraído da Descrição)")
-
-                        # 2. Notas Boticário (Campo xInfComp)
-                        inf_comp = root.xpath('//*[local-name()="xInfComp"]/text()')
-                        if inf_comp:
-                            prazos_bot = re.findall(r'R\$\s*[\d,.]+\s*venc\s*(\d{2}/\d{2}/\d{4})', inf_comp[0])
-                            for p in prazos_bot:
-                                vencimentos.append(f"Vencimento: {p} (Padrão Boticário)")
-
-                        # 3. Notas de Mercadoria (Tags dup/dVenc)
-                        dups = root.xpath('//*[local-name()="dup"]')
+                        # 2. Busca em Tags estruturadas
+                        dups = root.xpath('//dup | //parcela')
                         for d in dups:
-                            dv = d.xpath('.//*[local-name()="dVenc"]/text()')
+                            dv = d.xpath('.//dVenc/text() | .//venc/text()')
                             if dv: vencimentos.append(f"Vencimento: {dv[0]} (Tag estruturada)")
 
-                        # Exibir resultados
                         if vencimentos:
                             for v in set(vencimentos):
                                 st.warning(f"📅 **{v}**")
                         else:
-                            st.error("⚠️ Vencimento não detectado automaticamente no XML.")
-                            if discrim: st.text_area("Texto da Nota:", discrim[0])
-                except:
-                    st.error("Erro ao ler os detalhes desta nota específica.")
+                            st.error("⚠️ Vencimento não encontrado no XML. Verifique a descrição abaixo:")
+                            if texto_extra: st.text_area("Descrição:", texto_extra[0], height=100)
+                            
+                except Exception as e:
+                    st.error(f"Erro técnico ao processar esta nota: {e}")
         else:
-            st.error("Nenhuma nota encontrada com este termo.")
+            st.error("Nenhuma nota encontrada.")
