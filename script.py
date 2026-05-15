@@ -8,14 +8,12 @@ from supabase import create_client
 SUPABASE_URL = "https://tcvfvnzsmgtjsnsphgom.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRjdmZ2bnpzbWd0c2puc3BoZ29tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4MTg0NDMsImV4cCI6MjA5NDM5NDQ0M30.Sk55DOfrbMuthd2eIF68mK0w7h7PIJ4UGMT_wqagbLg"
 
-# Inicializa o cliente com tratamento de erro
 try:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    st.error("Erro ao conectar ao banco de dados. Verifique sua conexão.")
+    st.error("Erro de conexão com o banco de dados.")
 
 st.set_page_config(page_title="Ginseng Fiscal", layout="wide")
-
 st.title("🛡️ Sistema Permanente Grupo Ginseng")
 
 aba1, aba2 = st.tabs(["🔍 Consultar Nota", "📦 Upload de Lote"])
@@ -23,33 +21,43 @@ aba1, aba2 = st.tabs(["🔍 Consultar Nota", "📦 Upload de Lote"])
 with aba2:
     st.header("Upload para o Banco de Dados")
     arquivos_up = st.file_uploader("Suba o ZIP aqui", type=['xml', 'zip'], accept_multiple_files=True)
+    
     if st.button("🚀 Salvar na Nuvem"):
         if arquivos_up:
             total = 0
-            progresso = st.progress(0)
-            status_text = st.empty()
+            status_placeholder = st.empty()
             
-            for i, item in enumerate(arquivos_up):
+            for item in arquivos_up:
+                # SE FOR ZIP: Abre e lê cada XML lá dentro
                 if item.name.lower().endswith('.zip'):
                     with zipfile.ZipFile(item) as z:
-                        for info in z.infolist():
-                            if not info.is_dir() and info.filename.lower().endswith('.xml'):
-                                conteudo = z.read(info.filename).decode('utf-8', errors='ignore')
-                                try:
-                                    supabase.table("notas_fiscais").insert({"nome_arquivo": info.filename, "conteudo_xml": conteudo}).execute()
-                                    total += 1
-                                except: pass
-                else:
+                        for filename in z.namelist():
+                            if filename.lower().endswith('.xml'):
+                                with z.open(filename) as f:
+                                    conteudo = f.read().decode('utf-8', errors='ignore')
+                                    try:
+                                        supabase.table("notas_fiscais").insert({
+                                            "nome_arquivo": filename, 
+                                            "conteudo_xml": conteudo
+                                        }).execute()
+                                        total += 1
+                                        status_placeholder.text(f"Enviando nota nº {total}...")
+                                    except:
+                                        continue
+                # SE FOR XML SOLTO: Lê direto
+                elif item.name.lower().endswith('.xml'):
                     conteudo = item.read().decode('utf-8', errors='ignore')
                     try:
-                        supabase.table("notas_fiscais").insert({"nome_arquivo": item.name, "conteudo_xml": conteudo}).execute()
+                        supabase.table("notas_fiscais").insert({
+                            "nome_arquivo": item.name, 
+                            "conteudo_xml": conteudo
+                        }).execute()
                         total += 1
-                    except: pass
-                
-                progresso.progress((i + 1) / len(arquivos_up))
-                status_text.text(f"Processando: {total} notas enviadas...")
+                        status_placeholder.text(f"Enviando nota nº {total}...")
+                    except:
+                        continue
             
-            st.success(f"✅ {total} notas foram guardadas na nuvem permanentemente!")
+            st.success(f"✅ Sucesso! {total} notas foram guardadas na nuvem!")
 
 with aba1:
     st.header("Busca de Vencimentos")
@@ -86,7 +94,8 @@ with aba1:
                         dups = root.xpath('//dup | //parcela')
                         for d in dups:
                             dv = d.xpath('.//dVenc/text() | .//venc/text()')
-                            if dv: vencimentos.append(dv[0])
+                            if dv:
+                                vencimentos.append(dv[0])
 
                         if vencimentos:
                             for v in sorted(list(set(vencimentos))):
